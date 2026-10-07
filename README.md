@@ -142,31 +142,32 @@ sequenceDiagram
     actor User as User
     participant Runner as HarnessRunner
     participant Loop as AgentLoop
-    participant LLM as Ollama / Local AI
+    participant LLM as Local LLM
     participant Policy as PolicyEngine
     participant Exec as ToolExecutor
     participant Valid as OutputValidator
-    participant Tool as ITool (e.g. ServerStatus)
+    participant Tool as Registered ITool
 
-    User->>Runner: POST /api/agent/run
-    Runner->>Loop: ExecuteAsync(AgentState)
+    User->>Runner: Submit Run Request
+    Runner->>Loop: Execute Loop State
     Loop->>LLM: PLAN: Generate completion with tool catalog
-    LLM-->>Loop: ACT: Request tool 'get_server_status'
-    Loop->>Policy: EvaluatePolicy(tool, arguments)
+    LLM-->>Loop: ACT: Request tool execution
+    Loop->>Policy: Evaluate policy and arguments
     alt Risk Level CRITICAL or Malicious Payload
-        Policy-->>Loop: BLOCKED (Security Violation)
-        Loop-->>Runner: Safe guarded halt
-    else Risk Level LOW / MEDIUM
-        Policy-->>Exec: ALLOWED
-        Exec->>Tool: ExecuteAsync(arguments)
-        Tool-->>Exec: Raw ToolResult
-        Exec->>Valid: Validate(tool, result)
-        Valid-->>Exec: ValidationOutcome (Valid / Retryable / Fatal)
+        Policy-->>Loop: BLOCKED: Security policy violation
+        Loop-->>Runner: Safe guardrail halt
+        Runner-->>User: Security explanation response
+    else Risk Level LOW or MEDIUM
+        Policy-->>Exec: ALLOWED: Proceed to execution
+        Exec->>Tool: ExecuteAsync with timeout
+        Tool-->>Exec: Raw tool execution result
+        Exec->>Valid: Validate JSON output schema
+        Valid-->>Exec: Schema validation passed
         Exec-->>Loop: OBSERVE: Validated result
-        Loop->>LLM: EVALUATE: Synthesize final conclusion
+        Loop->>LLM: EVALUATE: Synthesize conclusion
         LLM-->>Loop: Final verified answer
-        Loop-->>Runner: COMPLETE
-        Runner-->>User: AgentResponse
+        Loop-->>Runner: COMPLETE: Finish agent cycle
+        Runner-->>User: Verified AgentResponse
     end
 ```
 
