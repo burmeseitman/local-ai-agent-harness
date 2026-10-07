@@ -190,24 +190,72 @@ sequenceDiagram
 
 ## 🛠️ Technology Stack
 
-### Backend
-- **Framework**: .NET 8 / 10 ASP.NET Core Web API
-- **Architecture**: Clean Architecture, SOLID, Dependency Injection
-- **Database**: Entity Framework Core with SQLite (PostgreSQL-ready schema)
-- **Logging & Tracing**: Serilog, OpenTelemetry `ActivitySource` & `Meter`
-- **Validation**: FluentValidation & JSON Schema Output Validation
-- **Testing**: xUnit, FluentAssertions, NSubstitute
+The project is built entirely with modern, enterprise-ready technologies designed for high performance, type safety, observability, and local zero-cost execution.
 
-### Frontend
-- **Framework**: React 18 with TypeScript & Vite
-- **Styling**: Tailwind CSS (dark developer/AI operations theme)
-- **Data Fetching**: TanStack React Query v5
-- **Routing**: React Router v6
-- **Visualizations**: Recharts (Latency area charts, tool usage bars, pie distributions)
-- **Icons**: Lucide Icons
+### Detailed Stack Matrix
 
-### AI & Infrastructure
-- **LLM Engine**: Ollama (`llama3.2` or configurable) with built-in fallback simulator
+| Layer | Technology | Version | Purpose in Harness Architecture |
+| :--- | :--- | :--- | :--- |
+| **Backend Framework** | [.NET](https://dotnet.microsoft.com/) / [ASP.NET Core](https://learn.microsoft.com/aspnet/core) | `8.0` / `10.0` | High-performance asynchronous Web API runtime |
+| **Language** | [C#](https://learn.microsoft.com/dotnet/csharp/) | `12` / `13` | Strongly typed object modeling, pattern matching, async/await |
+| **Architecture** | Clean Architecture / DDD | - | Clear boundary separation: Models, Core, Tools, Memory, Observability, Infrastructure, Api |
+| **ORM & Database** | [EF Core](https://learn.microsoft.com/ef/core/) + SQLite | `10.0.10` | Embedded local relational storage for runs, messages, tool audits, and memory (PostgreSQL-compatible) |
+| **Observability** | [OpenTelemetry](https://opentelemetry.io/) SDK & API | `1.10.0` | Fine-grained distributed tracing (`ActivitySource`) and runtime metrics (`Meter`) |
+| **Logging** | [Serilog](https://serilog.net/) + Console Sink | `4.0.0` | Structured, contextual JSON log output with trace correlation |
+| **API Contracts** | [Swagger / OpenAPI](https://swagger.io/) (Swashbuckle) | `7.2.0` | Interactive REST API explorer and OpenAPI 3.0 specification |
+| **Validation** | [FluentValidation](https://fluentvalidation.net/) + JSON Schema | `11.11.0` | Schema validation for tool input/output contracts and request DTOs |
+| **Unit Testing** | [xUnit](https://xunit.net/) | `2.9.3` | Comprehensive test runner for unit and contract verification |
+| **Mocking & Asserts** | [NSubstitute](https://nsubstitute.github.io/) & [FluentAssertions](https://fluentassertions.com/) | `5.3.0` / `7.0.0` | Expressive assertions and test double substitutions |
+| **Frontend Framework** | [React](https://react.dev/) | `18.2.0` | Component-based interactive UI with concurrent rendering |
+| **Language** | [TypeScript](https://www.typescriptlang.org/) | `5.4.2` | End-to-end typed contracts matching backend DTO schemas |
+| **Build Tool** | [Vite](https://vitejs.dev/) | `5.1.6` | Lightning-fast development server and optimized Rollup bundling |
+| **Styling** | [Tailwind CSS](https://tailwindcss.com/) | `3.4.1` | Dark modern developer/AI operations design system |
+| **Server State** | [TanStack React Query](https://tanstack.com/query) | `5.28.4` | Asynchronous cache management, optimistic updates, background polling |
+| **Client Routing** | [React Router](https://reactrouter.com/) | `6.22.3` | Client-side routing for Dashboard, Console, Tools, Memory, Runs, Traces, Metrics |
+| **Data Visualization** | [Recharts](https://recharts.org/) | `2.12.3` | Area charts (latency trends), Bar charts (tool usage), and Pie charts (run outcomes) |
+| **Icons** | [Lucide React](https://lucide.dev/) | `0.359.0` | Clean technical iconography for developer dashboards |
+| **Primary LLM** | [Ollama](https://ollama.ai/) | Latest | Local LLM inference engine supporting configurable models (`llama3.2`, `mistral`, etc.) |
+| **Streaming** | Server-Sent Events (SSE) | HTTP/1.1 | Real-time push of execution steps (`PLAN`, `ACT`, `OBSERVE`, `EVALUATE`, `COMPLETE`) to UI |
+| **Containers** | [Docker](https://www.docker.com/) & Docker Compose | `3.8` | Multi-stage build containerization and multi-service orchestration |
+| **Reverse Proxy** | [Nginx](https://nginx.org/) Alpine | `alpine` | Production static asset server and API reverse proxy in container deployment |
+
+---
+
+### Component Responsibility Breakdown
+
+```
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              FRONTEND (React + TS)                             │
+│  - Agent Console (3-Column Layout)     - Visual Execution Graph Timeline       │
+│  - Tool Registry & Manual Tester       - Memory Store Manager (CRUD & Search)  │
+│  - OpenTelemetry Trace Viewer          - Performance Metrics & KPIs (Recharts) │
+└──────────────────────────────────────┬─────────────────────────────────────────┘
+                                       │ HTTP / REST & Server-Sent Events (SSE)
+┌──────────────────────────────────────▼─────────────────────────────────────────┐
+│                           BACKEND API (ASP.NET Core Web API)                   │
+│  - Controllers & Routes                - Global Exception Handling Middleware  │
+│  - SSE Streaming Endpoint              - OpenAPI / Swagger Documentation       │
+└──────────────────────────────────────┬─────────────────────────────────────────┘
+                                       │ Dependency Injection
+┌──────────────────────────────────────▼─────────────────────────────────────────┐
+│                       HARNESS CORE (Zero-Trust Governing Runtime)              │
+│  - HarnessRunner (Pipeline Coordinator)- AgentLoop (State Machine: PLAN->ACT)  │
+│  - PolicyEngine (Risk Guardrails)      - OutputValidator (JSON Schema Checker) │
+│  - ToolRegistry & ToolExecutor         - RetryPolicy (Exponential Backoff)     │
+│  - ContextBuilder (Dynamic Assembly)   - ExecutionTracer (OpenTelemetry)       │
+└──────────────┬───────────────────────┼───────────────────────┬─────────────────┘
+               │                       │                       │
+┌──────────────▼────────┐┌─────────────▼─────────┐┌────────────▼────────────────┐
+│      HARNESS.TOOLS    ││     HARNESS.MEMORY    ││   HARNESS.INFRASTRUCTURE    │
+│ - get_server_status   ││ - ShortTerm Memory    ││ - OllamaModelProvider       │
+│ - calculator          ││ - LongTerm Memory     ││ - SimulatedModelProvider    │
+│ - search_documentation││ - Episodic Memory     ││ - AppDbContext (EF Core)    │
+│ - get_system_logs     ││ - Semantic Memory     ││ - DbSeeder (Seed Records)   │
+│ - get_incident_history││ - Keyword Scorer      ││ - SQLite / PostgreSQL       │
+│ - flaky_tool_simulator││ - Candidate Extractor ││                             │
+│ - delete_server_cluster│└──────────────────────┘└─────────────────────────────┘
+└───────────────────────┘
+```
 - **Streaming**: Server-Sent Events (SSE) `/api/agent/stream`
 - **Containers**: Docker & Docker Compose
 
