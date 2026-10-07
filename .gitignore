@@ -1,0 +1,30 @@
+# .NET
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Node / Frontend
+node_modules/
+dist/
+.env.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.db-shm
+*.db-wal
