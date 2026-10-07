@@ -141,7 +141,7 @@ sequenceDiagram
     autonumber
     actor User as User
     participant Runner as HarnessRunner
-    participant Loop as AgentLoop
+    participant Engine as AgentLoop
     participant LLM as Local LLM
     participant Policy as PolicyEngine
     participant Exec as ToolExecutor
@@ -149,13 +149,13 @@ sequenceDiagram
     participant Tool as Registered ITool
 
     User->>Runner: Submit Run Request
-    Runner->>Loop: Execute Loop State
-    Loop->>LLM: PLAN: Generate completion with tool catalog
-    LLM-->>Loop: ACT: Request tool execution
-    Loop->>Policy: Evaluate policy and arguments
+    Runner->>Engine: Execute Loop State
+    Engine->>LLM: PLAN: Generate completion with tool catalog
+    LLM-->>Engine: ACT: Request tool execution
+    Engine->>Policy: Evaluate policy and arguments
     alt Risk Level CRITICAL or Malicious Payload
-        Policy-->>Loop: BLOCKED: Security policy violation
-        Loop-->>Runner: Safe guardrail halt
+        Policy-->>Engine: BLOCKED: Security policy violation
+        Engine-->>Runner: Safe guardrail halt
         Runner-->>User: Security explanation response
     else Risk Level LOW or MEDIUM
         Policy-->>Exec: ALLOWED: Proceed to execution
@@ -163,10 +163,10 @@ sequenceDiagram
         Tool-->>Exec: Raw tool execution result
         Exec->>Valid: Validate JSON output schema
         Valid-->>Exec: Schema validation passed
-        Exec-->>Loop: OBSERVE: Validated result
-        Loop->>LLM: EVALUATE: Synthesize conclusion
-        LLM-->>Loop: Final verified answer
-        Loop-->>Runner: COMPLETE: Finish agent cycle
+        Exec-->>Engine: OBSERVE: Validated result
+        Engine->>LLM: EVALUATE: Synthesize conclusion
+        LLM-->>Engine: Final verified answer
+        Engine-->>Runner: COMPLETE: Finish agent cycle
         Runner-->>User: Verified AgentResponse
     end
 ```
