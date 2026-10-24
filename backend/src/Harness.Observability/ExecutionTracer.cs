@@ -17,7 +17,9 @@ public class ExecutionTracer : IExecutionTracer
     private static readonly Counter<long> RetriesCounter = HarnessMeter.CreateCounter<long>("harness.retries.total", "Total retried attempts");
     private static readonly Histogram<double> LatencyHistogram = HarnessMeter.CreateHistogram<double>("harness.run.duration_ms", "ms", "Run duration");
 
-    private readonly ConcurrentBag<ExecutionTrace> _traces = new();
+    private long _retryCount = 0;
+    private const int MaxTracesCapacity = 2000;
+    private readonly ConcurrentQueue<ExecutionTrace> _traces = new();
     private readonly ILogger<ExecutionTracer> _logger;
 
     public ExecutionTracer(ILogger<ExecutionTracer> logger)
@@ -45,7 +47,12 @@ public class ExecutionTracer : IExecutionTracer
             Status = status
         };
 
-        _traces.Add(trace);
+        _traces.Enqueue(trace);
+
+        // Keep memory bounded to prevent memory leaks in long-running harnesses
+        while (_traces.Count > MaxTracesCapacity && _traces.TryDequeue(out _))
+        {
+        }
 
         if (status == "ERROR")
         {
@@ -66,9 +73,15 @@ public class ExecutionTracer : IExecutionTracer
         // Metrics increment
         if (operation == "RUN_INITIATED") RunsCounter.Add(1);
         if (operation == "TOOL_EXECUTION_COMPLETED") ToolCallsCounter.Add(1);
-        if (operation.Contains("RETRY")) RetriesCounter.Add(1);
+        if (operation.Contains("RETRY"))
+        {
+            RetriesCounter.Add(1);
+            Interlocked.Increment(ref _retryCount);
+        }
         if (operation == "RUN_FINISHED") LatencyHistogram.Record(latencyMs);
     }
+
+    public long GetRetryCount() => Interlocked.Read(ref _retryCount);
 
     public List<ExecutionTrace> GetTracesForRun(string runId)
     {

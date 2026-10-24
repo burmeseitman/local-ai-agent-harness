@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Harness.Core.Interfaces;
 using Harness.Models;
 using Microsoft.Extensions.Logging;
@@ -44,7 +45,7 @@ public class AgentLoop
 
     public async Task<AgentState> ExecuteAsync(
         AgentState state,
-        Action<AgentStep>? onStep = null,
+        Func<AgentStep, Task>? onStep = null,
         CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("Starting AgentLoop for Run {RunId}, User Prompt: '{Prompt}'", state.RunId, state.UserPrompt);
@@ -62,17 +63,22 @@ public class AgentLoop
             // ==========================================
             var planStep = await RecordStepAsync(state, AgentStepType.PLAN, "Plan Execution Step",
                 $"Iteration {state.CurrentIteration}: Synthesizing context and determining next strategic action.",
-                state.UserPrompt, async () =>
-                {
-                    var completion = await _modelProvider.GenerateAsync(state.Messages, state.AvailableTools, cancellationToken);
-                    return completion;
-                }, onStep);
+                state.UserPrompt,
+                () => _modelProvider.GenerateAsync(state.Messages, state.AvailableTools, cancellationToken),
+                onStep, cancellationToken);
 
-            var modelCompletion = (ModelCompletionResult?)planStep.ResultObject;
+            var modelCompletion = planStep.ResultObject;
+            if (modelCompletion != null && modelCompletion.IsFallback)
+            {
+                planStep.Step.Description += $" [AI Model Fallback: {modelCompletion.FallbackReason}]";
+            }
+
             if (modelCompletion == null)
             {
                 state.Status = RunStatus.Failed;
-                state.ErrorMessage = "Model completion returned null.";
+                state.ErrorMessage = planStep.Step.ErrorDetails is { } err
+                    ? $"Model provider failed: {err}"
+                    : "Model completion returned null.";
                 break;
             }
 
@@ -87,69 +93,50 @@ public class AgentLoop
                 // ==========================================
                 await RecordStepAsync<object?>(state, AgentStepType.COMPLETE, "Task Completed",
                     "Agent synthesized verified conclusion and completed execution cycle.",
-                    state.FinalAnswer, () => Task.FromResult<object?>(null), onStep);
+                    state.FinalAnswer, () => Task.FromResult<object?>(null), onStep, cancellationToken);
 
                 break;
             }
 
-            // ==========================================
-            // 2. NODE: ACT
-            // ==========================================
-            var targetCall = modelCompletion.ToolCalls[0];
-            state.PendingToolCall = targetCall;
-
-            var actStep = await RecordStepAsync(state, AgentStepType.ACT, $"Request Tool: {targetCall.ToolName}",
-                $"Agent selected tool '{targetCall.ToolName}' with arguments: {targetCall.ArgumentsJson}",
-                targetCall.ArgumentsJson,
-                () => Task.FromResult(targetCall), onStep);
-
-            // ==========================================
-            // 3. NODE: OBSERVE
-            // ==========================================
-            var observeStep = await RecordStepAsync(state, AgentStepType.OBSERVE, $"Execute Tool: {targetCall.ToolName}",
-                $"Dispatched tool call to Harness Policy Engine & Tool Executor.",
-                targetCall.ArgumentsJson, async () =>
-                {
-                    return await _toolExecutor.ExecuteToolCallAsync(targetCall, state.RunId, cancellationToken);
-                }, onStep);
-
-            var toolResult = (ToolResult?)observeStep.ResultObject;
-            state.LastToolResult = toolResult;
-
-            // Update conversation working memory with tool output
-            var toolMessageContent = toolResult != null && toolResult.IsSuccess
-                ? toolResult.OutputJson
-                : $"Tool execution failed or was blocked: {toolResult?.ErrorMessage}";
-
+            // Record the assistant turn that requested the tools, so the model
+            // sees its own tool calls on the next iteration (tool-calling protocol).
             state.Messages.Add(new AgentMessage
             {
                 ConversationId = state.ConversationId,
-                Role = MessageRole.TOOL,
-                Content = toolMessageContent,
-                Metadata = new Dictionary<string, string>
-                {
-                    ["ToolName"] = targetCall.ToolName,
-                    ["Status"] = toolResult?.Status.ToString() ?? "Unknown"
-                }
+                Role = MessageRole.MODEL_OUTPUT,
+                Content = modelCompletion.Content,
+                ToolCalls = modelCompletion.ToolCalls.ToList()
             });
 
-            // ==========================================
-            // 4. NODE: EVALUATE
-            // ==========================================
-            var evalStep = await RecordStepAsync(state, AgentStepType.EVALUATE, "Evaluate Tool Result",
-                $"Evaluated result from {targetCall.ToolName}. Success: {toolResult?.IsSuccess}, Status: {toolResult?.Status}",
-                toolMessageContent,
-                () => Task.FromResult(toolResult), onStep);
+            // Execute every requested tool call in order.
+            ToolResult? blockedResult = null;
+            ToolCall? blockedCall = null;
 
-            // If the tool was blocked by policy, generate a safe explanatory finish
-            if (toolResult != null && toolResult.Status == ToolExecutionStatus.Blocked)
+            foreach (var toolCall in modelCompletion.ToolCalls)
             {
-                state.FinalAnswer = $"Harness Security Guardrail: Action '{targetCall.ToolName}' was blocked. Reason: {toolResult.ErrorMessage}";
+                var toolResult = await ExecuteToolCallStepsAsync(state, toolCall, onStep, cancellationToken);
+
+                if (toolResult.Status is ToolExecutionStatus.Blocked or ToolExecutionStatus.AwaitingApproval)
+                {
+                    blockedResult = toolResult;
+                    blockedCall = toolCall;
+                    break;
+                }
+            }
+
+            // If a tool was blocked or requires approval, generate a safe explanatory finish
+            if (blockedResult != null && blockedCall != null)
+            {
+                var guardPrefix = blockedResult.Status == ToolExecutionStatus.AwaitingApproval
+                    ? "Harness Approval Required"
+                    : "Harness Security Guardrail";
+
+                state.FinalAnswer = $"{guardPrefix}: Action '{blockedCall.ToolName}' status: {blockedResult.Status}. Reason: {blockedResult.ErrorMessage}";
                 state.Status = RunStatus.Completed;
 
                 await RecordStepAsync<object?>(state, AgentStepType.COMPLETE, "Safely Guarded Completion",
                     "Harness terminated run safely after enforcing security policy restriction.",
-                    state.FinalAnswer, () => Task.FromResult<object?>(null), onStep);
+                    state.FinalAnswer, () => Task.FromResult<object?>(null), onStep, cancellationToken);
 
                 break;
             }
@@ -162,10 +149,80 @@ public class AgentLoop
             state.ErrorMessage = $"Agent exceeded maximum loop iterations limit ({state.MaxIterations}). Terminated to prevent infinite loop.";
 
             await RecordStepAsync<object?>(state, AgentStepType.FAIL, "Loop Limit Exceeded",
-                state.ErrorMessage, null, () => Task.FromResult<object?>(null), onStep);
+                state.ErrorMessage, null, () => Task.FromResult<object?>(null), onStep, cancellationToken);
         }
 
         return state;
+    }
+
+    /// <summary>
+    /// Runs the ACT -> OBSERVE -> EVALUATE nodes for a single tool call and appends
+    /// the tool result to working memory. Never returns null.
+    /// </summary>
+    private async Task<ToolResult> ExecuteToolCallStepsAsync(
+        AgentState state,
+        ToolCall toolCall,
+        Func<AgentStep, Task>? onStep,
+        CancellationToken cancellationToken)
+    {
+        state.PendingToolCall = toolCall;
+
+        // ==========================================
+        // 2. NODE: ACT
+        // ==========================================
+        await RecordStepAsync(state, AgentStepType.ACT, $"Request Tool: {toolCall.ToolName}",
+            $"Agent selected tool '{toolCall.ToolName}' with arguments: {toolCall.ArgumentsJson}",
+            toolCall.ArgumentsJson,
+            () => Task.FromResult(toolCall), onStep, cancellationToken);
+
+        // ==========================================
+        // 3. NODE: OBSERVE
+        // ==========================================
+        var observeStep = await RecordStepAsync(state, AgentStepType.OBSERVE, $"Execute Tool: {toolCall.ToolName}",
+            "Dispatched tool call to Harness Policy Engine & Tool Executor.",
+            toolCall.ArgumentsJson,
+            () => _toolExecutor.ExecuteToolCallAsync(toolCall, state.RunId, cancellationToken),
+            onStep, cancellationToken);
+
+        // Guarantee a structured result even if the executor threw.
+        var toolResult = observeStep.ResultObject ?? new ToolResult
+        {
+            ToolCallId = toolCall.Id,
+            ToolName = toolCall.ToolName,
+            IsSuccess = false,
+            Status = ToolExecutionStatus.Failed,
+            ErrorMessage = observeStep.Step.ErrorDetails ?? "Tool executor returned no result."
+        };
+        state.LastToolResult = toolResult;
+
+        // Update conversation working memory with tool output
+        // Sanitize indirect prompt injection patterns in tool outputs before feeding back to model context
+        var toolMessageContent = toolResult.IsSuccess
+            ? SanitizeToolOutput(toolResult.OutputJson)
+            : $"Tool execution failed or was blocked: {toolResult.ErrorMessage}";
+
+        state.Messages.Add(new AgentMessage
+        {
+            ConversationId = state.ConversationId,
+            Role = MessageRole.TOOL,
+            Content = toolMessageContent,
+            Metadata = new Dictionary<string, string>
+            {
+                ["ToolName"] = toolCall.ToolName,
+                ["ToolCallId"] = toolCall.Id,
+                ["Status"] = toolResult.Status.ToString()
+            }
+        });
+
+        // ==========================================
+        // 4. NODE: EVALUATE
+        // ==========================================
+        await RecordStepAsync(state, AgentStepType.EVALUATE, "Evaluate Tool Result",
+            $"Evaluated result from {toolCall.ToolName}. Success: {toolResult.IsSuccess}, Status: {toolResult.Status}",
+            toolMessageContent,
+            () => Task.FromResult(toolResult), onStep, cancellationToken);
+
+        return toolResult;
     }
 
     private class StepExecutionHolder<T>
@@ -181,7 +238,8 @@ public class AgentLoop
         string description,
         string? inputPayload,
         Func<Task<T>> action,
-        Action<AgentStep>? onStep)
+        Func<AgentStep, Task>? onStep,
+        CancellationToken cancellationToken)
     {
         var sw = Stopwatch.StartNew();
         var step = new AgentStep
@@ -214,11 +272,21 @@ public class AgentLoop
             }
             else if (result != null)
             {
-                step.OutputPayload = result.ToString();
+                step.OutputPayload = result is ToolCall tc
+                    ? JsonSerializer.Serialize(new { tc.Id, tc.ToolName, tc.ArgumentsJson })
+                    : result.ToString();
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Caller cancelled the run: record and propagate instead of swallowing.
+            step.Status = "Cancelled";
+            step.ErrorDetails = "Run was cancelled.";
+            throw;
         }
         catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Step {StepType} failed for Run {RunId}", type, state.RunId);
             step.Status = "Failed";
             step.ErrorDetails = ex.Message;
             step.OutputPayload = $"Error: {ex.Message}";
@@ -229,9 +297,29 @@ public class AgentLoop
             step.DurationMs = sw.Elapsed.TotalMilliseconds;
             state.Steps.Add(step);
             _tracer.RecordEvent(state.RunId, state.ConversationId, $"STEP_{type}", step.DurationMs, step.Description, step.Status);
-            onStep?.Invoke(step);
+        }
+
+        // Notify outside the try/finally so a failing observer (e.g. a disconnected
+        // SSE client) surfaces to the caller rather than being recorded as a step error.
+        if (onStep != null)
+        {
+            await onStep(step);
         }
 
         return new StepExecutionHolder<T> { Step = step, ResultObject = result };
+    }
+
+    private static readonly Regex IndirectInjectionRegex = new(
+        @"(IGNORE\s+ALL\s+PREVIOUS\s+INSTRUCTIONS|SYSTEM\s+PROMPT\s+OVERRIDE|<script[\s\S]*?>[\s\S]*?<\/script>)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static string SanitizeToolOutput(string rawOutput)
+    {
+        if (string.IsNullOrWhiteSpace(rawOutput)) return rawOutput;
+        if (IndirectInjectionRegex.IsMatch(rawOutput))
+        {
+            return IndirectInjectionRegex.Replace(rawOutput, "[REDACTED_SECURITY_RISK]");
+        }
+        return rawOutput;
     }
 }

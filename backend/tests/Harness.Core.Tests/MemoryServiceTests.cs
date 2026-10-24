@@ -29,7 +29,7 @@ public class MemoryServiceTests
     [Fact]
     public async Task SearchMemory_ShouldReturnRelevantAndExcludeIrrelevant()
     {
-        var service = new MemoryService(new[]
+        var service = new MemoryService(null, new[]
         {
             new MemoryItem { Id = "1", Content = "Database connection pool timeout settings", Importance = 4.5, Tags = new() { "database" } },
             new MemoryItem { Id = "2", Content = "Frontend UI color scheme configuration", Importance = 1.0, Tags = new() { "ui" } }

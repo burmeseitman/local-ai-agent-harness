@@ -1,6 +1,6 @@
 # 🛡️ Secure Local AI Agent Harness
 
-> **A production-grade educational and portfolio reference implementation of a Secure AI Agent Harness built with .NET 8 / 10 Clean Architecture and React / TypeScript.**
+> **A production-grade educational and portfolio reference implementation of a Secure AI Agent Harness built with .NET 10 Clean Architecture and React 18 / TypeScript.**
 
 ---
 
@@ -18,7 +18,8 @@
 11. [Automated Testing & Verification](#-automated-testing--verification)
 12. [Demo Scenarios](#-demo-scenarios)
 13. [API Documentation (OpenAPI)](#-api-documentation-openapi)
-14. [Future Roadmap: Graph Orchestration vs Loop Engineering](#-future-roadmap)
+14. [Security Audit & Hardening Matrix](#-security-audit--hardening-matrix)
+15. [Future Roadmap: Graph Orchestration vs Loop Engineering](#-future-roadmap)
 
 ---
 
@@ -38,11 +39,15 @@ graph TD
     ContextBuilder --> LLM["🤖 Local LLM (Ollama)"]
     LLM --> ToolCallIntent["📝 Tool Call Intent"]
     ToolCallIntent --> PolicyEngine["⚖️ Policy Engine (Guardrails)"]
-    PolicyEngine -- "ALLOWED" --> ToolExecutor["⚙️ Tool Executor"]
+    PolicyEngine -- "ALLOWED" --> InputValidator["🛡️ Input Schema Validator"]
     PolicyEngine -- "BLOCKED / CRITICAL" --> BlockedResponse["🛑 Safe Policy Halt"]
+    PolicyEngine -- "REQUIRES_APPROVAL" --> ApprovalResponse["⏸️ Approval Required Pause"]
+    InputValidator -- "Valid" --> ToolExecutor["⚙️ Tool Executor"]
+    InputValidator -- "Invalid" --> ValidationFailure["⚠️ Input Validation Failure"]
     ToolExecutor --> OutputValidator["🔍 Output Validator"]
-    OutputValidator -- "Schema Valid" --> ContextUpdate["🔄 Context Update"]
+    OutputValidator -- "Schema Valid" --> Sanitizer["🧹 Output Sanitizer (Indirect Injection Defense)"]
     OutputValidator -- "Transient Failure" --> RetryPolicy["🔁 Exponential Retry"]
+    Sanitizer --> ContextUpdate["🔄 Context Update"]
     ContextUpdate --> LLM
     LLM --> FinalResponse["✅ Verified Response to User"]
 ```
@@ -366,6 +371,23 @@ The **Agent Console** page includes one-click presets for all key scenarios:
 | `GET` | `/api/health` | Health probe reporting runtime status |
 | `GET` | `/api/metrics` | Telemetry counters (runs, tool calls, retries, latency) |
 | `GET` | `/api/traces` | Query OpenTelemetry audit traces |
+| `GET` | `/api/config` | Live runtime configuration & active guardrails |
+
+---
+
+## 🛡️ Security Audit & Hardening Matrix
+
+The harness runtime underwent a comprehensive architectural and operational security review, hardening 30 critical risk vectors across four engineering sprints:
+
+| Domain | Vulnerability Addressed | Hardened Implementation |
+|:---|:---|:---|
+| **Memory Isolation** | Memory poisoning & persistent prompt injection via user turns | Word-boundary preference filtering, injection blocklist, and memory context mapped to low-privilege `user` role instead of `system` role. |
+| **Tool Execution** | Arbitrary or malformed parameter payloads bypassing execution logic | Pre-execution `IInputValidator` schema validation verifying required arguments, strict types, and enum domains before tools are invoked. |
+| **Indirect Injection** | Dangerous instructions embedded in retrieved docs or system logs | `SanitizeToolOutput` pipeline automatically scrubs indirect prompt injection sequences (`IGNORE PREVIOUS`, script blocks) prior to context feeding. |
+| **Policy Granularity** | Conflating manual approval with silent drop | `HIGH` risk operations yield explicit `REQUIRES_APPROVAL` policy decisions and `AwaitingApproval` status with clear explanation to the user. |
+| **Network & Access** | CSRF attacks against local daemon & exposed host ports | Origin-whitelisted CORS policy with credentials; Ollama service bound exclusively to internal bridge network in Docker Compose. |
+| **Loop Resilience** | Process crashing on client SSE disconnect & infinite loops | Asynchronous, awaited step notification pipeline (`Func<AgentStep, Task>`) with catch/cancellation, and hard limit on max iterations. |
+| **Persistence Integrity** | State loss upon process termination | `IMemoryStore`, `IAgentRunStore`, and `IToolExecutionStore` synchronize state directly to disk (`secure_harness.db`) with early run lifecycle registration. |
 
 ---
 

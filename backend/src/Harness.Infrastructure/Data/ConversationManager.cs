@@ -13,6 +13,15 @@ public class ConversationManager : IConversationManager
         _db = db;
     }
 
+    public async Task<Conversation?> GetConversationAsync(string conversationId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId)) return null;
+
+        return await _db.Conversations
+            .Include(c => c.Messages)
+            .FirstOrDefaultAsync(c => c.Id == conversationId, cancellationToken);
+    }
+
     public async Task<Conversation> GetOrCreateConversationAsync(string? conversationId, CancellationToken cancellationToken = default)
     {
         if (!string.IsNullOrEmpty(conversationId))
@@ -75,11 +84,15 @@ public class ConversationManager : IConversationManager
 
     public async Task<List<AgentMessage>> GetHistoryAsync(string conversationId, int limit = 20, CancellationToken cancellationToken = default)
     {
-        return await _db.Messages
+        // Take the most recent N messages, then return them in chronological order.
+        var recent = await _db.Messages
             .Where(m => m.ConversationId == conversationId)
-            .OrderBy(m => m.CreatedAt)
+            .OrderByDescending(m => m.CreatedAt)
             .Take(limit)
             .ToListAsync(cancellationToken);
+
+        recent.Reverse();
+        return recent;
     }
 
     public async Task<List<Conversation>> GetAllConversationsAsync(CancellationToken cancellationToken = default)

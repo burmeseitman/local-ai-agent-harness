@@ -15,7 +15,6 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" Condition="Exists('/Users/minhtet/.nuget/packages/microsoft.extensions.http')" />
   </ItemGroup>
 
 </Project>

@@ -29,10 +29,15 @@ export const AgentConsolePage: React.FC = () => {
   ]);
   const [activeSteps, setActiveSteps] = useState<AgentStep[]>([]);
   const [selectedStep, setSelectedStep] = useState<AgentStep | null>(null);
+  // Persist the conversation across turns so the agent sees prior context.
+  const [conversationId, setConversationId] = useState<string | undefined>(undefined);
 
   // Queries for inspector panel
   const { data: tools } = useQuery({ queryKey: ['tools'], queryFn: api.getTools });
   const { data: memories } = useQuery({ queryKey: ['memories'], queryFn: () => api.getMemories() });
+
+  const appendAssistant = (content: string) =>
+    setConversation(prev => [...prev, { role: 'assistant', content }]);
 
   const handleSend = async (userPromptText?: string) => {
     const textToSend = userPromptText || prompt;
@@ -46,12 +51,38 @@ export const AgentConsolePage: React.FC = () => {
     // Append user message
     setConversation(prev => [...prev, { role: 'user', content: textToSend }]);
 
+    // Non-streaming fallback. Only used when the stream never delivered any event,
+    // so the agent is never executed twice for the same prompt.
+    const runViaHttp = async () => {
+      try {
+        const resp = await api.runAgent({ prompt: textToSend, conversationId });
+        setConversationId(resp.conversationId);
+        setActiveSteps(resp.steps ?? []);
+        appendAssistant(resp.finalAnswer || resp.errorMessage || 'Execution completed.');
+      } catch (err: any) {
+        appendAssistant(`Execution Error: ${err.message}`);
+      } finally {
+        setIsRunning(false);
+      }
+    };
+
     try {
       // Connect to SSE stream endpoint for real-time live event streaming
-      const encodedPrompt = encodeURIComponent(textToSend);
-      const eventSource = new EventSource(`/api/agent/stream?prompt=${encodedPrompt}`);
+      const params = new URLSearchParams({ prompt: textToSend });
+      if (conversationId) params.set('conversationId', conversationId);
+      const eventSource = new EventSource(api.streamUrl(params));
+
+      let receivedAnyEvent = false;
+      let finished = false;
+
+      const finish = () => {
+        finished = true;
+        eventSource.close();
+        setIsRunning(false);
+      };
 
       eventSource.onmessage = (event) => {
+        receivedAnyEvent = true;
         try {
           const data = JSON.parse(event.data);
 
@@ -67,44 +98,34 @@ export const AgentConsolePage: React.FC = () => {
             });
           } else if (data.type === 'run_completed' && data.response) {
             const resp: AgentResponse = data.response;
-            eventSource.close();
-            setIsRunning(false);
-
-            setConversation(prev => [
-              ...prev,
-              { role: 'assistant', content: resp.finalAnswer || resp.errorMessage || 'Execution finished.' }
-            ]);
-            setActiveSteps(resp.steps);
+            finish();
+            setConversationId(resp.conversationId);
+            appendAssistant(resp.finalAnswer || resp.errorMessage || 'Execution finished.');
+            setActiveSteps(resp.steps ?? []);
+          } else if (data.type === 'run_error') {
+            finish();
+            appendAssistant(`Execution Error: ${data.error ?? 'Agent run failed.'}`);
           }
         } catch {
-          // Handled
+          // Ignore malformed event payloads
         }
       };
 
-      eventSource.onerror = async () => {
-        eventSource.close();
-        // Fallback to standard HTTP execution
-        try {
-          const resp = await api.runAgent({ prompt: textToSend });
-          setActiveSteps(resp.steps);
-          setConversation(prev => [
-            ...prev,
-            { role: 'assistant', content: resp.finalAnswer || resp.errorMessage || 'Execution completed.' }
-          ]);
-        } catch (err: any) {
-          setConversation(prev => [
-            ...prev,
-            { role: 'assistant', content: `Execution Error: ${err.message}` }
-          ]);
-        } finally {
-          setIsRunning(false);
+      eventSource.onerror = () => {
+        if (finished) return;
+        finish();
+
+        if (!receivedAnyEvent) {
+          // Stream could not be established at all -> safe to fall back.
+          setIsRunning(true);
+          void runViaHttp();
+        } else {
+          // Run was already executing server-side; do NOT re-run it.
+          appendAssistant('Connection to the live stream was lost. The run may still complete — check the Runs page for the final result.');
         }
       };
     } catch (err: any) {
-      setConversation(prev => [
-        ...prev,
-        { role: 'assistant', content: `Harness Error: ${err.message}` }
-      ]);
+      appendAssistant(`Harness Error: ${err.message}`);
       setIsRunning(false);
     }
   };

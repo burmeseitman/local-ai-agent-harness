@@ -111,6 +111,47 @@ public class AgentLoopTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_WhenMultipleToolCallsRequested_ShouldExecuteAllInOrder()
+    {
+        _model.GenerateAsync(Arg.Any<List<AgentMessage>>(), Arg.Any<List<ToolDefinition>>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new ModelCompletionResult
+                {
+                    Content = "Calling two tools",
+                    ToolCalls = new List<ToolCall>
+                    {
+                        new() { ToolName = "tool_1", ArgumentsJson = "{}" },
+                        new() { ToolName = "tool_2", ArgumentsJson = "{}" }
+                    }
+                },
+                new ModelCompletionResult
+                {
+                    Content = "Both tools completed.",
+                    ToolCalls = new List<ToolCall>()
+                }
+            );
+
+        _executor.ExecuteToolCallAsync(Arg.Is<ToolCall>(t => t.ToolName == "tool_1"), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new ToolResult { ToolName = "tool_1", IsSuccess = true, OutputJson = "{\"res\": 1}" });
+
+        _executor.ExecuteToolCallAsync(Arg.Is<ToolCall>(t => t.ToolName == "tool_2"), Arg.Any<string>(), Arg.Any<CancellationToken>())
+            .Returns(new ToolResult { ToolName = "tool_2", IsSuccess = true, OutputJson = "{\"res\": 2}" });
+
+        var loop = new AgentLoop(_model, _executor, _tracer, NullLogger<AgentLoop>.Instance);
+        var state = new AgentState { UserPrompt = "Run multiple tools" };
+
+        var finalState = await loop.ExecuteAsync(state);
+
+        finalState.Status.Should().Be(RunStatus.Completed);
+        finalState.FinalAnswer.Should().Be("Both tools completed.");
+        // Should have ACT steps for both tools
+        finalState.Steps.Count(s => s.Type == AgentStepType.ACT).Should().Be(2);
+        finalState.Steps.Count(s => s.Type == AgentStepType.OBSERVE).Should().Be(2);
+        // Messages should contain the assistant turn preserving tool calls
+        finalState.Messages.Should().Contain(m => m.Role == MessageRole.MODEL_OUTPUT && m.ToolCalls != null && m.ToolCalls.Count == 2);
+    }
+
+    [Fact]
     public async Task ExecuteAsync_WhenCancelled_ShouldThrowOperationCanceledException()
     {
         using var cts = new CancellationTokenSource();

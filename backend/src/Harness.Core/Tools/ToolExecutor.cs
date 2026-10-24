@@ -14,10 +14,12 @@ public class ToolExecutor : IToolExecutor
 {
     private readonly IToolRegistry _toolRegistry;
     private readonly IPolicyEngine _policyEngine;
+    private readonly IInputValidator _inputValidator;
     private readonly IOutputValidator _outputValidator;
     private readonly IRetryPolicy _retryPolicy;
     private readonly IExecutionTracer _tracer;
     private readonly ILogger<ToolExecutor> _logger;
+    private readonly IToolExecutionStore? _executionStore;
     private readonly ToolExecutorOptions _options;
 
     public ToolExecutor(
@@ -27,14 +29,18 @@ public class ToolExecutor : IToolExecutor
         IRetryPolicy retryPolicy,
         IExecutionTracer tracer,
         ILogger<ToolExecutor> logger,
+        IInputValidator? inputValidator = null,
+        IToolExecutionStore? executionStore = null,
         ToolExecutorOptions? options = null)
     {
         _toolRegistry = toolRegistry;
         _policyEngine = policyEngine;
+        _inputValidator = inputValidator ?? new Validation.InputValidator();
         _outputValidator = outputValidator;
         _retryPolicy = retryPolicy;
         _tracer = tracer;
         _logger = logger;
+        _executionStore = executionStore;
         _options = options ?? new ToolExecutorOptions();
     }
 
@@ -72,15 +78,37 @@ public class ToolExecutor : IToolExecutor
         if (policyDecision.Decision != PolicyDecisionType.ALLOWED)
         {
             sw.Stop();
-            _logger.LogWarning("Tool {ToolName} blocked by policy: {Reason}", tool.Name, policyDecision.Reason);
+            _logger.LogWarning("Tool {ToolName} prevented by policy: {Reason}", tool.Name, policyDecision.Reason);
+            var isAwaitingApproval = policyDecision.Decision == PolicyDecisionType.REQUIRES_APPROVAL;
             return new ToolResult
             {
                 ToolCallId = call.Id,
                 ToolName = tool.Name,
                 IsSuccess = false,
-                ErrorMessage = $"Security Policy Violation: {policyDecision.Reason}",
+                ErrorMessage = isAwaitingApproval
+                    ? $"Action Paused: {policyDecision.Reason}"
+                    : $"Security Policy Violation: {policyDecision.Reason}",
                 RiskLevel = tool.RiskLevel,
-                Status = ToolExecutionStatus.Blocked,
+                Status = isAwaitingApproval ? ToolExecutionStatus.AwaitingApproval : ToolExecutionStatus.Blocked,
+                ExecutionDurationMs = sw.Elapsed.TotalMilliseconds
+            };
+        }
+
+        // 3. Input Arguments Schema Validation
+        var inputValidation = _inputValidator.Validate(tool, call.ArgumentsJson);
+        if (!inputValidation.IsValid)
+        {
+            sw.Stop();
+            _logger.LogWarning("Tool {ToolName} input validation failed: {Msg}", tool.Name, inputValidation.Message);
+            _tracer.RecordEvent(runId, "", "INPUT_VALIDATION_FAILED", sw.Elapsed.TotalMilliseconds, inputValidation.Message, "WARN");
+            return new ToolResult
+            {
+                ToolCallId = call.Id,
+                ToolName = tool.Name,
+                IsSuccess = false,
+                ErrorMessage = $"Input Validation Failure: {inputValidation.Message}",
+                RiskLevel = tool.RiskLevel,
+                Status = ToolExecutionStatus.Failed,
                 ExecutionDurationMs = sw.Elapsed.TotalMilliseconds
             };
         }
@@ -89,24 +117,44 @@ public class ToolExecutor : IToolExecutor
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(TimeSpan.FromSeconds(_options.ExecutionTimeoutSeconds));
 
-        ToolResult toolResult = await _retryPolicy.ExecuteWithRetryAsync(
-            async attempt =>
-            {
-                _tracer.RecordEvent(runId, "", "TOOL_EXECUTION_ATTEMPT", 0, $"Attempt {attempt} executing {tool.Name}");
-                return await tool.ExecuteAsync(call.ArgumentsJson, cts.Token);
-            },
-            result =>
-            {
-                // Decide if retryable based on OutputValidator
-                if (result.IsSuccess) return false;
-                var validation = _outputValidator.Validate(tool, result);
-                return validation.Outcome == ValidationOutcome.Retryable;
-            },
-            maxRetries: 2,
-            initialDelay: TimeSpan.FromMilliseconds(150),
-            cancellationToken: cts.Token);
+        ToolResult toolResult;
+        try
+        {
+            toolResult = await _retryPolicy.ExecuteWithRetryAsync(
+                async attempt =>
+                {
+                    if (attempt > 1)
+                    {
+                        _tracer.RecordEvent(runId, "", "TOOL_RETRY_ATTEMPT", 0, $"Retry attempt {attempt} for tool {tool.Name}", "WARN");
+                    }
+                    _tracer.RecordEvent(runId, "", "TOOL_EXECUTION_ATTEMPT", 0, $"Attempt {attempt} executing {tool.Name}");
+                    return await tool.ExecuteAsync(call.ArgumentsJson, cts.Token);
+                },
+                result =>
+                {
+                    // Decide if retryable based on OutputValidator
+                    if (result.IsSuccess) return false;
+                    var validation = _outputValidator.Validate(tool, result);
+                    return validation.Outcome == ValidationOutcome.Retryable;
+                },
+                maxRetries: 2,
+                initialDelay: TimeSpan.FromMilliseconds(150),
+                cancellationToken: cts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Our own timeout fired (caller did not cancel) -> report a structured failure.
+            toolResult = CreateFailure(call, tool,
+                $"Timeout: tool '{tool.Name}' exceeded execution limit of {_options.ExecutionTimeoutSeconds}s.");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Tool {ToolName} threw an unhandled exception for run {RunId}", tool.Name, runId);
+            toolResult = CreateFailure(call, tool, $"Tool '{tool.Name}' threw an exception: {ex.Message}");
+        }
 
         toolResult.ToolCallId = call.Id;
+        toolResult.ToolName = tool.Name;
         toolResult.RiskLevel = tool.RiskLevel;
 
         // 4. Output Validation
@@ -133,6 +181,39 @@ public class ToolExecutor : IToolExecutor
         _tracer.RecordEvent(runId, "", "TOOL_EXECUTION_COMPLETED", sw.Elapsed.TotalMilliseconds,
             $"Finished {tool.Name}. Success: {toolResult.IsSuccess}");
 
+        if (_executionStore != null)
+        {
+            try
+            {
+                await _executionStore.RecordExecutionAsync(new ToolExecutionRecord
+                {
+                    RunId = runId,
+                    ToolName = tool.Name,
+                    RiskLevel = tool.RiskLevel,
+                    ArgumentsJson = call.ArgumentsJson,
+                    OutputJson = toolResult.OutputJson,
+                    IsSuccess = toolResult.IsSuccess,
+                    DurationMs = toolResult.ExecutionDurationMs,
+                    ErrorMessage = toolResult.ErrorMessage,
+                    PolicyDecision = policyDecision.Decision
+                }, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to persist ToolExecutionRecord for {ToolName}", tool.Name);
+            }
+        }
+
         return toolResult;
     }
+
+    private static ToolResult CreateFailure(ToolCall call, ITool tool, string message) => new()
+    {
+        ToolCallId = call.Id,
+        ToolName = tool.Name,
+        IsSuccess = false,
+        ErrorMessage = message,
+        RiskLevel = tool.RiskLevel,
+        Status = ToolExecutionStatus.Failed
+    };
 }

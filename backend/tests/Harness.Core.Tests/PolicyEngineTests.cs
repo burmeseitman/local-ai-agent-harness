@@ -65,6 +65,16 @@ public class PolicyEngineTests
     }
 
     [Fact]
+    public async Task EvaluatePolicyAsync_HighRiskTool_ShouldRequireApprovalByDefault()
+    {
+        var tool = CreateMockTool("restart_service", ToolRiskLevel.HIGH);
+        var decision = await _engine.EvaluatePolicyAsync(tool, "{}");
+
+        decision.Decision.Should().Be(PolicyDecisionType.REQUIRES_APPROVAL);
+        decision.Reason.Should().Contain("approval");
+    }
+
+    [Fact]
     public async Task EvaluatePolicyAsync_OversizedArgument_ShouldBeBlocked()
     {
         var tool = CreateMockTool("test_tool", ToolRiskLevel.LOW);

@@ -11,6 +11,8 @@ public class ModelCompletionResult
     public int CompletionTokens { get; set; }
     public double LatencyMs { get; set; }
     public bool HasToolCalls => ToolCalls.Count > 0;
+    public bool IsFallback { get; set; } = false;
+    public string? FallbackReason { get; set; }
 }
 
 public interface IAiModelProvider
@@ -51,9 +53,25 @@ public interface IPolicyEngine
     Task<PolicyDecision> EvaluatePolicyAsync(ITool tool, string argumentsJson, CancellationToken cancellationToken = default);
 }
 
+public interface IInputValidator
+{
+    ValidationResult Validate(ITool tool, string argumentsJson);
+}
+
 public interface IOutputValidator
 {
     ValidationResult Validate(ITool tool, ToolResult result);
+}
+
+public interface IAgentRunStore
+{
+    Task CreateRunAsync(AgentRun run, CancellationToken cancellationToken = default);
+    Task UpdateRunAsync(AgentRun run, CancellationToken cancellationToken = default);
+}
+
+public interface IToolExecutionStore
+{
+    Task RecordExecutionAsync(ToolExecutionRecord record, CancellationToken cancellationToken = default);
 }
 
 public interface IToolExecutor
@@ -69,6 +87,13 @@ public interface IRetryPolicy
         int maxRetries = 2,
         TimeSpan? initialDelay = null,
         CancellationToken cancellationToken = default);
+}
+
+public interface IMemoryStore
+{
+    Task<MemoryItem> SaveAsync(MemoryItem item, CancellationToken cancellationToken = default);
+    Task<bool> DeleteAsync(string id, CancellationToken cancellationToken = default);
+    Task<List<MemoryItem>> LoadAllAsync(CancellationToken cancellationToken = default);
 }
 
 public interface IMemoryService
@@ -94,10 +119,12 @@ public interface IExecutionTracer
     void RecordEvent(string runId, string conversationId, string operation, double latencyMs, string? details = null, string status = "OK");
     List<ExecutionTrace> GetTracesForRun(string runId);
     List<ExecutionTrace> GetAllTraces(int limit = 100);
+    long GetRetryCount();
 }
 
 public interface IConversationManager
 {
+    Task<Conversation?> GetConversationAsync(string conversationId, CancellationToken cancellationToken = default);
     Task<Conversation> GetOrCreateConversationAsync(string? conversationId, CancellationToken cancellationToken = default);
     Task<AgentMessage> AddMessageAsync(string conversationId, MessageRole role, string content, Dictionary<string, string>? metadata = null, CancellationToken cancellationToken = default);
     Task<List<AgentMessage>> GetHistoryAsync(string conversationId, int limit = 20, CancellationToken cancellationToken = default);
@@ -107,8 +134,12 @@ public interface IConversationManager
 
 public interface IHarnessRunner
 {
+    /// <param name="onStep">
+    /// Awaited after every recorded step (e.g. to stream SSE events). Exceptions thrown by
+    /// the callback propagate to the caller.
+    /// </param>
     Task<AgentResponse> RunAsync(
         AgentRequest request,
-        Action<AgentStep>? onStep = null,
+        Func<AgentStep, Task>? onStep = null,
         CancellationToken cancellationToken = default);
 }

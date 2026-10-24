@@ -6,6 +6,11 @@ using Microsoft.Extensions.Logging;
 
 namespace Harness.Core.Runner;
 
+public class HarnessRunnerOptions
+{
+    public int MaxIterations { get; set; } = 10;
+}
+
 public class HarnessRunner : IHarnessRunner
 {
     private readonly IContextBuilder _contextBuilder;
@@ -15,6 +20,8 @@ public class HarnessRunner : IHarnessRunner
     private readonly IConversationManager _conversationManager;
     private readonly IExecutionTracer _tracer;
     private readonly ILogger<HarnessRunner> _logger;
+    private readonly IAgentRunStore? _runStore;
+    private readonly HarnessRunnerOptions _options;
 
     public HarnessRunner(
         IContextBuilder contextBuilder,
@@ -23,7 +30,9 @@ public class HarnessRunner : IHarnessRunner
         IMemoryService memoryService,
         IConversationManager conversationManager,
         IExecutionTracer tracer,
-        ILogger<HarnessRunner> logger)
+        ILogger<HarnessRunner> logger,
+        IAgentRunStore? runStore = null,
+        HarnessRunnerOptions? options = null)
     {
         _contextBuilder = contextBuilder;
         _toolRegistry = toolRegistry;
@@ -32,11 +41,13 @@ public class HarnessRunner : IHarnessRunner
         _conversationManager = conversationManager;
         _tracer = tracer;
         _logger = logger;
+        _runStore = runStore;
+        _options = options ?? new HarnessRunnerOptions();
     }
 
     public async Task<AgentResponse> RunAsync(
         AgentRequest request,
-        Action<AgentStep>? onStep = null,
+        Func<AgentStep, Task>? onStep = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -49,8 +60,29 @@ public class HarnessRunner : IHarnessRunner
         _logger.LogInformation("Initiating Harness Run {RunId} in Conversation {ConvId}", runId, conversationId);
         _tracer.RecordEvent(runId, conversationId, "RUN_INITIATED", 0, $"User prompt: {request.Prompt}");
 
+        var runEntity = new AgentRun
+        {
+            Id = runId,
+            ConversationId = conversationId,
+            UserPrompt = request.Prompt,
+            Status = RunStatus.Running,
+            StartTime = DateTime.UtcNow
+        };
+
+        if (_runStore != null)
+        {
+            try
+            {
+                await _runStore.CreateRunAsync(runEntity, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to persist initial AgentRun {RunId}", runId);
+            }
+        }
+
         // 1. Persist User Prompt Message
-        await _conversationManager.AddMessageAsync(conversationId, MessageRole.USER, request.Prompt, cancellationToken: cancellationToken);
+        var userMessage = await _conversationManager.AddMessageAsync(conversationId, MessageRole.USER, request.Prompt, cancellationToken: cancellationToken);
 
         // 2. Build Rich Context (Prompts, Memory, Tools, Guardrails)
         var availableTools = _toolRegistry.GetDefinitions();
@@ -73,9 +105,10 @@ public class HarnessRunner : IHarnessRunner
             messages.Add(new AgentMessage { Role = MessageRole.MEMORY, Content = mem.Content });
         }
 
-        // Historical turns
+        // Historical turns (most recent, chronological). Exclude the message we just
+        // persisted by Id — it is appended explicitly below as the current task.
         var history = await _conversationManager.GetHistoryAsync(conversationId, limit: 10, cancellationToken);
-        foreach (var h in history.Where(m => m.Content != request.Prompt))
+        foreach (var h in history.Where(m => m.Id != userMessage?.Id))
         {
             messages.Add(h);
         }
@@ -91,7 +124,7 @@ public class HarnessRunner : IHarnessRunner
             UserPrompt = request.Prompt,
             Messages = messages,
             AvailableTools = availableTools,
-            MaxIterations = 10
+            MaxIterations = _options.MaxIterations
         };
 
         var finalState = await _agentLoop.ExecuteAsync(state, onStep, cancellationToken);
@@ -114,6 +147,26 @@ public class HarnessRunner : IHarnessRunner
         _tracer.RecordEvent(runId, conversationId, "RUN_FINISHED", sw.Elapsed.TotalMilliseconds,
             $"Final status: {finalState.Status}, Iterations: {finalState.CurrentIteration}",
             finalState.Status.ToString());
+
+        runEntity.Status = finalState.Status;
+        runEntity.EndTime = DateTime.UtcNow;
+        runEntity.LatencyMs = sw.Elapsed.TotalMilliseconds;
+        runEntity.LoopCount = finalState.CurrentIteration;
+        runEntity.FinalAnswer = finalAnswer;
+        runEntity.ErrorMessage = finalState.ErrorMessage;
+        runEntity.Steps = finalState.Steps;
+
+        if (_runStore != null)
+        {
+            try
+            {
+                await _runStore.UpdateRunAsync(runEntity, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to update completed AgentRun {RunId}", runId);
+            }
+        }
 
         return new AgentResponse
         {

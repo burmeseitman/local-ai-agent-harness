@@ -37,26 +37,6 @@ public class AgentController : ControllerBase
         try
         {
             var response = await _harnessRunner.RunAsync(request, null, cancellationToken);
-
-            // Save run to database
-            var runEntity = new AgentRun
-            {
-                Id = response.RunId,
-                ConversationId = response.ConversationId,
-                UserPrompt = request.Prompt,
-                Status = response.Status,
-                StartTime = DateTime.UtcNow.AddMilliseconds(-response.LatencyMs),
-                EndTime = DateTime.UtcNow,
-                LatencyMs = response.LatencyMs,
-                LoopCount = response.LoopCount,
-                FinalAnswer = response.FinalAnswer,
-                ErrorMessage = response.ErrorMessage,
-                Steps = response.Steps
-            };
-
-            _db.AgentRuns.Add(runEntity);
-            await _db.SaveChangesAsync(cancellationToken);
-
             return Ok(response);
         }
         catch (OperationCanceledException)
@@ -66,7 +46,7 @@ public class AgentController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing agent run.");
-            return StatusCode(500, new { error = ex.Message });
+            return StatusCode(500, new { error = "An internal error occurred while processing the agent request." });
         }
     }
 
@@ -82,6 +62,7 @@ public class AgentController : ControllerBase
         Response.Headers.Append("Content-Type", "text/event-stream");
         Response.Headers.Append("Cache-Control", "no-cache");
         Response.Headers.Append("Connection", "keep-alive");
+        Response.Headers.Append("X-Accel-Buffering", "no"); // disable nginx proxy buffering
 
         var request = new AgentRequest
         {
@@ -90,42 +71,62 @@ public class AgentController : ControllerBase
             StreamEvents = true
         };
 
-        var response = await _harnessRunner.RunAsync(request, async step =>
+        try
         {
-            var evtData = JsonSerializer.Serialize(new
+            // Callback is awaited by the AgentLoop, so writes are sequential and
+            // exceptions (e.g. client disconnect) propagate here instead of crashing the process.
+            var response = await _harnessRunner.RunAsync(
+                request,
+                step => WriteSseEventAsync(new { type = "step_update", step }, cancellationToken),
+                cancellationToken);
+
+            await WriteSseEventAsync(new { type = "run_completed", response }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("SSE client disconnected; agent stream cancelled.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during streamed agent run.");
+            if (!cancellationToken.IsCancellationRequested)
             {
-                type = "step_update",
-                step
-            });
-            await Response.WriteAsync($"data: {evtData}\n\n", cancellationToken);
-            await Response.Body.FlushAsync(cancellationToken);
-        }, cancellationToken);
+                try
+                {
+                    await WriteSseEventAsync(new { type = "run_error", error = "Agent run failed. See server logs for details." }, cancellationToken);
+                }
+                catch (Exception writeEx)
+                {
+                    _logger.LogDebug(writeEx, "Failed to write SSE error event (client likely gone).");
+                }
+            }
+        }
+    }
 
-        // Record to DB
-        _db.AgentRuns.Add(new AgentRun
-        {
-            Id = response.RunId,
-            ConversationId = response.ConversationId,
-            UserPrompt = prompt,
-            Status = response.Status,
-            StartTime = DateTime.UtcNow.AddMilliseconds(-response.LatencyMs),
-            EndTime = DateTime.UtcNow,
-            LatencyMs = response.LatencyMs,
-            LoopCount = response.LoopCount,
-            FinalAnswer = response.FinalAnswer,
-            ErrorMessage = response.ErrorMessage,
-            Steps = response.Steps
-        });
-        await _db.SaveChangesAsync(cancellationToken);
+    // Match ASP.NET Core MVC output (camelCase) so the frontend can read SSE payloads.
+    private static readonly JsonSerializerOptions SseJsonOptions = new(JsonSerializerDefaults.Web);
 
-        var finalEvt = JsonSerializer.Serialize(new
-        {
-            type = "run_completed",
-            response
-        });
-        await Response.WriteAsync($"data: {finalEvt}\n\n", cancellationToken);
+    private async Task WriteSseEventAsync(object payload, CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(payload, SseJsonOptions);
+        await Response.WriteAsync($"data: {json}\n\n", cancellationToken);
         await Response.Body.FlushAsync(cancellationToken);
     }
+
+    private static AgentRun ToRunEntity(AgentResponse response, string prompt) => new()
+    {
+        Id = response.RunId,
+        ConversationId = response.ConversationId,
+        UserPrompt = prompt,
+        Status = response.Status,
+        StartTime = DateTime.UtcNow.AddMilliseconds(-response.LatencyMs),
+        EndTime = DateTime.UtcNow,
+        LatencyMs = response.LatencyMs,
+        LoopCount = response.LoopCount,
+        FinalAnswer = response.FinalAnswer,
+        ErrorMessage = response.ErrorMessage,
+        Steps = response.Steps
+    };
 
     [HttpGet("runs")]
     public async Task<ActionResult<List<AgentRun>>> GetAllRunsAsync(CancellationToken cancellationToken)
