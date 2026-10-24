@@ -12,23 +12,69 @@ public class ObservabilityController : ControllerBase
 {
     private readonly IExecutionTracer _tracer;
     private readonly AppDbContext _db;
+    private readonly IConfiguration _config;
+    private readonly IAiModelProvider _aiModelProvider;
 
-    public ObservabilityController(IExecutionTracer tracer, AppDbContext db)
+    public ObservabilityController(
+        IExecutionTracer tracer,
+        AppDbContext db,
+        IConfiguration config,
+        IAiModelProvider aiModelProvider)
     {
         _tracer = tracer;
         _db = db;
+        _config = config;
+        _aiModelProvider = aiModelProvider;
     }
 
     [HttpGet("health")]
-    public ActionResult<object> GetHealth()
+    public async Task<ActionResult<object>> GetHealthAsync(CancellationToken cancellationToken)
     {
+        bool dbHealthy = false;
+        try
+        {
+            dbHealthy = await _db.Database.CanConnectAsync(cancellationToken);
+        }
+        catch
+        {
+            dbHealthy = false;
+        }
+
+        var overallStatus = dbHealthy ? "HEALTHY" : "DEGRADED";
+
         return Ok(new
         {
-            status = "HEALTHY",
+            status = overallStatus,
             timestamp = DateTime.UtcNow,
             service = "Secure Local AI Agent Harness",
             version = "1.0.0",
-            guardrailsActive = true
+            guardrailsActive = true,
+            components = new
+            {
+                database = dbHealthy ? "HEALTHY" : "UNHEALTHY",
+                modelProvider = _aiModelProvider.ProviderName,
+                activeModel = _aiModelProvider.ModelName
+            }
+        });
+    }
+
+    [HttpGet("config")]
+    public ActionResult<object> GetConfig()
+    {
+        return Ok(new
+        {
+            aiProvider = _aiModelProvider.ProviderName,
+            modelName = _aiModelProvider.ModelName,
+            ollamaBaseUrl = _config["OLLAMA_BASE_URL"] ?? "http://localhost:11434",
+            autoExecuteLowRisk = true,
+            autoExecuteMediumRisk = true,
+            requireApprovalHighRisk = true,
+            blockCriticalRisk = true,
+            maxIterations = 10,
+            toolTimeoutSeconds = 30,
+            maxResultBytes = 65536,
+            databaseProvider = _config["DATABASE_PROVIDER"] ?? "sqlite",
+            connectionString = _config["CONNECTION_STRING"] ?? "Data Source=secure_harness.db"
         });
     }
 
@@ -43,6 +89,7 @@ public class ObservabilityController : ControllerBase
 
         var toolExecs = await _db.ToolExecutions.LongCountAsync(cancellationToken);
         var toolFails = await _db.ToolExecutions.LongCountAsync(t => !t.IsSuccess, cancellationToken);
+        var realRetries = _tracer.GetRetryCount();
 
         return Ok(new HarnessMetrics
         {
@@ -52,7 +99,7 @@ public class ObservabilityController : ControllerBase
             AverageLatencyMs = Math.Round(avgLatency, 1),
             ToolCalls = toolExecs,
             ToolFailures = toolFails,
-            Retries = Math.Max(2, (long)(toolExecs * 0.15)),
+            Retries = realRetries,
             AverageLoopCount = Math.Round(avgLoops, 1)
         });
     }

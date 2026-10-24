@@ -25,7 +25,12 @@ public class ConversationsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<Conversation>> GetByIdAsync(string id, CancellationToken cancellationToken)
     {
-        var conv = await _conversationManager.GetOrCreateConversationAsync(id, cancellationToken);
+        var conv = await _conversationManager.GetConversationAsync(id, cancellationToken);
+        if (conv == null)
+        {
+            return NotFound(new { error = $"Conversation '{id}' not found." });
+        }
+
         var messages = await _conversationManager.GetHistoryAsync(id, 50, cancellationToken);
         conv.Messages = messages;
         return Ok(conv);

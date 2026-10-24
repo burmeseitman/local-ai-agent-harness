@@ -45,37 +45,33 @@ export const DashboardPage: React.FC = () => {
     queryFn: api.getTools,
   });
 
-  const totalRuns = metrics?.totalRuns || runs?.length || 0;
-  const successRuns = metrics?.successfulRuns || runs?.filter(r => r.status === 'Completed').length || 0;
-  const successRate = totalRuns > 0 ? Math.round((successRuns / totalRuns) * 100) : 100;
-  const avgLatency = metrics?.averageLatencyMs || (runs && runs.length > 0 ? Math.round(runs.reduce((a, c) => a + c.latencyMs, 0) / runs.length) : 380);
-  const toolCalls = metrics?.toolCalls || 24;
-  const retries = metrics?.retries || 3;
-  const avgLoops = metrics?.averageLoopCount || 2.1;
+  const totalRuns = metrics?.totalRuns ?? (runs ? runs.length : 0);
+  const successRuns = metrics?.successfulRuns ?? (runs ? runs.filter(r => r.status === 'Completed').length : 0);
+  const successRate = totalRuns > 0 ? Math.round((successRuns / totalRuns) * 100) : 0;
+  const avgLatency = metrics?.averageLatencyMs ?? (runs && runs.length > 0 ? Math.round(runs.reduce((a, c) => a + c.latencyMs, 0) / runs.length) : 0);
+  const toolCalls = metrics?.toolCalls ?? 0;
+  const retries = metrics?.retries ?? 0;
+  const avgLoops = metrics?.averageLoopCount ?? 0;
 
-  // Chart data: runs timeline
-  const runsTimeline = runs?.slice(0, 10).reverse().map((r, i) => ({
-    name: `Run ${i + 1}`,
-    latency: Math.round(r.latencyMs),
-    loops: r.loopCount,
-  })) || [
-    { name: 'Run 1', latency: 320, loops: 2 },
-    { name: 'Run 2', latency: 450, loops: 3 },
-    { name: 'Run 3', latency: 280, loops: 2 },
-    { name: 'Run 4', latency: 510, loops: 2 },
-    { name: 'Run 5', latency: 390, loops: 3 },
-  ];
+  // Chart data: runs timeline (empty if no runs yet)
+  const runsTimeline = runs && runs.length > 0
+    ? runs.slice(0, 10).reverse().map((r, i) => ({
+        name: `Run ${i + 1}`,
+        latency: Math.round(r.latencyMs),
+        loops: r.loopCount,
+      }))
+    : [];
 
   // Tool usage data
   const toolData = tools?.map(t => ({
-    name: t.name.replace('_', ' '),
-    count: t.executionCount || 4,
+    name: t.name.replace(/_/g, ' '),
+    count: t.executionCount ?? 0,
   })) || [];
 
-  const pieData = [
-    { name: 'Successful', value: successRuns || 8, color: '#10B981' },
-    { name: 'Failed / Blocked', value: (totalRuns - successRuns) || 2, color: '#EF4444' },
-  ];
+  const pieData = totalRuns > 0 ? [
+    { name: 'Successful', value: successRuns, color: '#10B981' },
+    { name: 'Failed / Blocked', value: (totalRuns - successRuns), color: '#EF4444' },
+  ] : [];
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto w-full">
@@ -246,20 +242,24 @@ export const DashboardPage: React.FC = () => {
         <div className="bg-[#111827] border border-gray-800 rounded-xl p-5 flex flex-col">
           <h2 className="text-sm font-semibold text-gray-200 mb-2">Outcome Distribution</h2>
           <div className="flex-1 flex items-center justify-center">
-            <div className="h-48 w-48">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={pieData} innerRadius={50} outerRadius={70} dataKey="value" paddingAngle={5}>
-                    {pieData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#1F2937', borderColor: '#374151', borderRadius: '8px', fontSize: '12px' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
+            {pieData.length > 0 ? (
+              <div className="h-48 w-48">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={pieData} innerRadius={50} outerRadius={70} dataKey="value" paddingAngle={5}>
+                      {pieData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#1F2937', borderColor: '#374151', borderRadius: '8px', fontSize: '12px' }}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="text-xs text-gray-500 py-12">No run outcomes recorded yet</div>
+            )}
           </div>
           <div className="flex justify-center space-x-6 text-xs text-gray-400 pt-2 border-t border-gray-800">
             <div className="flex items-center space-x-2">

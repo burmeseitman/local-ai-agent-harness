@@ -103,20 +103,6 @@ public class ToolsController : ControllerBase
 
         var result = await _toolExecutor.ExecuteToolCallAsync(toolCall, "manual-test-run", cancellationToken);
 
-        _db.ToolExecutions.Add(new ToolExecutionRecord
-        {
-            RunId = "manual-test-run",
-            ToolName = toolName,
-            RiskLevel = tool.RiskLevel,
-            ArgumentsJson = toolCall.ArgumentsJson,
-            OutputJson = result.OutputJson,
-            IsSuccess = result.IsSuccess,
-            DurationMs = result.ExecutionDurationMs,
-            ErrorMessage = result.ErrorMessage,
-            PolicyDecision = result.Status == ToolExecutionStatus.Blocked ? PolicyDecisionType.BLOCKED : PolicyDecisionType.ALLOWED
-        });
-        await _db.SaveChangesAsync(cancellationToken);
-
         return Ok(result);
     }
 }

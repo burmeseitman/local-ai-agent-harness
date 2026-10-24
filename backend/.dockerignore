@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+**/.local/
+**/.DS_Store
+**/*.db
+**/*.db-shm
+**/*.db-wal

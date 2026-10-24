@@ -48,11 +48,7 @@ public class OllamaModelProvider : IAiModelProvider
 
         try
         {
-            var ollamaMessages = messages.Select(m => new
-            {
-                role = MapRole(m.Role),
-                content = m.Content
-            }).ToList();
+            var ollamaMessages = messages.Select(ToOllamaMessage).ToList();
 
             object requestPayload;
             if (availableTools != null && availableTools.Count > 0)
@@ -140,7 +136,10 @@ public class OllamaModelProvider : IAiModelProvider
                 _logger.LogWarning("Ollama returned status code {StatusCode}. Falling back if enabled.", response.StatusCode);
                 if (_options.FallbackToSimulatedWhenUnavailable)
                 {
-                    return await _simulatedFallback.GenerateAsync(messages, availableTools, cancellationToken);
+                    var fallbackResult = await _simulatedFallback.GenerateAsync(messages, availableTools, cancellationToken);
+                    fallbackResult.IsFallback = true;
+                    fallbackResult.FallbackReason = $"Ollama returned status code {response.StatusCode}. Fallback provider invoked.";
+                    return fallbackResult;
                 }
                 throw new HttpRequestException($"Ollama API error: {response.StatusCode}");
             }
@@ -150,7 +149,10 @@ public class OllamaModelProvider : IAiModelProvider
             _logger.LogWarning(ex, "Failed to connect to Ollama at {BaseUrl}. Falling back to simulated provider.", _options.BaseUrl);
             if (_options.FallbackToSimulatedWhenUnavailable)
             {
-                return await _simulatedFallback.GenerateAsync(messages, availableTools, cancellationToken);
+                var fallbackResult = await _simulatedFallback.GenerateAsync(messages, availableTools, cancellationToken);
+                fallbackResult.IsFallback = true;
+                fallbackResult.FallbackReason = $"Failed to connect to Ollama ({ex.Message}). Fallback provider invoked.";
+                return fallbackResult;
             }
             throw;
         }
@@ -175,10 +177,58 @@ public class OllamaModelProvider : IAiModelProvider
         MessageRole.SYSTEM => "system",
         MessageRole.USER => "user",
         MessageRole.TOOL => "tool",
-        MessageRole.MEMORY => "system",
+        MessageRole.MEMORY => "user", // Memory items must be framed as contextual reference, NOT high-privilege system instructions
         MessageRole.MODEL_OUTPUT => "assistant",
         _ => "user"
     };
+
+    /// <summary>
+    /// Maps a harness message to the Ollama /api/chat message shape, including
+    /// assistant <c>tool_calls</c> and the <c>tool_name</c> on tool results.
+    /// </summary>
+    private static Dictionary<string, object?> ToOllamaMessage(AgentMessage m)
+    {
+        var msg = new Dictionary<string, object?>
+        {
+            ["role"] = MapRole(m.Role),
+            ["content"] = m.Content
+        };
+
+        if (m.Role == MessageRole.MODEL_OUTPUT && m.ToolCalls is { Count: > 0 })
+        {
+            msg["tool_calls"] = m.ToolCalls.Select(tc => new
+            {
+                function = new
+                {
+                    name = tc.ToolName,
+                    arguments = ParseArguments(tc.ArgumentsJson)
+                }
+            }).ToList();
+        }
+
+        if (m.Role == MessageRole.TOOL && m.Metadata.TryGetValue("ToolName", out var toolName))
+        {
+            msg["tool_name"] = toolName;
+        }
+
+        return msg;
+    }
+
+    private static readonly JsonElement EmptyArguments = JsonDocument.Parse("{}").RootElement.Clone();
+
+    private static JsonElement ParseArguments(string argumentsJson)
+    {
+        if (string.IsNullOrWhiteSpace(argumentsJson)) return EmptyArguments;
+        try
+        {
+            using var doc = JsonDocument.Parse(argumentsJson);
+            return doc.RootElement.ValueKind == JsonValueKind.Object ? doc.RootElement.Clone() : EmptyArguments;
+        }
+        catch (JsonException)
+        {
+            return EmptyArguments;
+        }
+    }
 
     private static List<ToolCall> TryExtractToolCallsFromText(string text, List<ToolDefinition> tools)
     {

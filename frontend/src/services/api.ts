@@ -42,6 +42,10 @@ export const api = {
   getRunById: (runId: string): Promise<AgentRun> =>
     fetchJson<AgentRun>(`/api/agent/runs/${runId}`),
 
+  /** Absolute/relative URL for the SSE agent stream, honoring VITE_API_BASE_URL. */
+  streamUrl: (params: URLSearchParams): string =>
+    `${BASE_URL}/api/agent/stream?${params.toString()}`,
+
   // Tools
   getTools: (): Promise<ToolItem[]> =>
     fetchJson<ToolItem[]>('/api/tools'),
@@ -72,8 +76,11 @@ export const api = {
     fetch(`${BASE_URL}/api/memory/${id}`, { method: 'DELETE' }).then(() => {}),
 
   // Observability
-  getHealth: (): Promise<{ status: string; service: string; guardrailsActive: boolean }> =>
+  getHealth: (): Promise<{ status: string; service: string; guardrailsActive: boolean; components?: any }> =>
     fetchJson('/api/health'),
+
+  getConfig: (): Promise<any> =>
+    fetchJson('/api/config'),
 
   getMetrics: (): Promise<HarnessMetrics> =>
     fetchJson<HarnessMetrics>('/api/metrics'),

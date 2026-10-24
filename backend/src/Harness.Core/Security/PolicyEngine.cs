@@ -8,8 +8,10 @@ public class PolicyEngineOptions
 {
     public bool AutoExecuteLowRisk { get; set; } = true;
     public bool AutoExecuteMediumRisk { get; set; } = true;
+    /// <summary>
+    /// When true, HIGH risk tools require administrative approval and are not auto-executed.
+    /// </summary>
     public bool RequireApprovalHighRisk { get; set; } = true;
-    public bool RequireApprovalCriticalRisk { get; set; } = true;
     public int MaxArgumentSizeBytes { get; set; } = 16384;
 }
 
@@ -83,10 +85,12 @@ public class PolicyEngine : IPolicyEngine
             case ToolRiskLevel.HIGH:
                 return Task.FromResult(new PolicyDecision
                 {
-                    Decision = _options.RequireApprovalHighRisk ? PolicyDecisionType.BLOCKED : PolicyDecisionType.ALLOWED,
+                    Decision = _options.RequireApprovalHighRisk ? PolicyDecisionType.REQUIRES_APPROVAL : PolicyDecisionType.ALLOWED,
                     ToolName = tool.Name,
                     RiskLevel = tool.RiskLevel,
-                    Reason = "Risk level HIGH requires explicit administrator approval and is blocked in automated runs.",
+                    Reason = _options.RequireApprovalHighRisk
+                        ? "Risk level HIGH requires administrator approval before execution."
+                        : "Risk level HIGH permitted by override configuration.",
                     Timestamp = DateTime.UtcNow
                 });
 
